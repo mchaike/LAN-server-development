@@ -1,0 +1,37 @@
+#include <iostream>
+#include <string>
+#include <boost/asio.hpp>
+
+using namespace boost::asio;
+using ip::tcp;
+
+int main() {
+    try {
+        io_context io_service;
+        tcp::socket socket(io_service);
+        socket.connect(tcp::endpoint(boost::asio::ip::make_address("172.16.1.38"), 1234));
+
+        std::string username, password;
+        std::cout << "Username: ";
+        std::getline(std::cin, username);
+        std::cout << "Password: ";
+        std::getline(std::cin, password);
+
+        std::string request = "action=login&username=" + username +
+            "&password=" + password + "\n";
+
+        write(socket, buffer(request));
+
+        streambuf response_buf;
+        read_until(socket, response_buf, "\n");
+        std::istream response_stream(&response_buf);
+        std::string response;
+        std::getline(response_stream, response);
+
+        std::cout << "Server Response: " << response << std::endl;
+    }
+    catch (std::exception& e) {
+        std::cerr << "Exception: " << e.what() << "\n";
+    }
+    return 0;
+}
