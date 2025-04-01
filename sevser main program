@@ -1,0 +1,153 @@
+// 服务器核心代码（去除加密）
+#include <iostream>
+#include <string>
+#include <boost/asio.hpp>
+#include <sqlite3.h>
+#include <sstream>
+
+using namespace boost::asio;
+using ip::tcp;
+
+class Session : public std::enable_shared_from_this<Session> {
+public:
+    Session(ip::tcp::socket socket, sqlite3* db) : socket_(std::move(socket)), db_(db) {}
+
+    void start() {
+        readRequest();
+    }
+
+private:
+    ip::tcp::socket socket_;
+    sqlite3* db_;
+    boost::asio::streambuf buffer_;
+
+    void readRequest() {
+        auto self(shared_from_this());
+        async_read_until(socket_, buffer_, "\n",
+            [this, self](boost::system::error_code ec, std::size_t length) {
+                if (!ec) processRequest();
+            });
+    }
+
+    void processRequest() {
+        std::istream is(&buffer_);
+        std::string request;
+        std::getline(is, request);
+
+        if (request.find("action=login") != std::string::npos) {
+            validateLogin(request);
+        }
+    }
+
+    void validateLogin(const std::string& request) {
+        std::string username, password;
+        if (!parseRequest(request, username, password)) {
+            sendResponse(false);
+            return;
+        }
+
+        std::string query = "SELECT password FROM user WHERE username = ?";
+        sqlite3_stmt* stmt;
+
+        // 检查预处理语句是否成功
+        if (sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, 0) != SQLITE_OK) {
+            std::cerr << "Prepare failed: " << sqlite3_errmsg(db_) << std::endl;
+            sendResponse(false);
+            return;
+        }
+
+        // 绑定参数并执行
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+
+        // 检查是否有查询结果
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* db_pass = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (password == db_pass) {
+                sendResponse(true);
+            }
+            else {
+                sendResponse(false);
+            }
+        }
+        else {
+            sendResponse(false);
+        }
+
+        sqlite3_finalize(stmt);
+    }
+
+    bool parseRequest(const std::string& request, std::string& username, std::string& password) {
+        std::istringstream stream(request);
+        std::string param;
+
+        while (std::getline(stream, param, '&')) {
+            size_t pos = param.find('=');
+            if (pos != std::string::npos) {
+                std::string key = param.substr(0, pos);
+                std::string value = param.substr(pos + 1);
+
+                if (key == "username") username = value;
+                else if (key == "password") password = value;
+            }
+        }
+
+        return !username.empty() && !password.empty();
+    }
+
+    void sendResponse(bool success) {
+        auto response = std::make_shared<std::string>(success ? "Login Success\n" : "Login Failed\n");
+        auto self(shared_from_this());
+        async_write(socket_, buffer(*response),
+            [this, self, response](boost::system::error_code ec, std::size_t) {
+                if (ec) {
+                    std::cerr << "Write failed: " << ec.message() << std::endl;
+                }
+            });
+    }
+};
+
+class Server
+{
+public:
+    Server(boost::asio::io_context& io_context, unsigned short port, sqlite3* db)
+        : acceptor_(io_context, ip::tcp::endpoint(boost::asio::ip::address_v4::any(), port)), db_(db) {
+        startAccept();
+    }
+
+private:
+    boost::asio::ip::tcp::acceptor acceptor_;
+    sqlite3* db_;
+
+    void startAccept()
+    {
+        acceptor_.async_accept(
+            [this](boost::system::error_code ec, ip::tcp::socket socket)
+            {
+                if (!ec)
+                {
+                    std::make_shared<Session>(std::move(socket), db_)->start();
+                }
+                startAccept();
+            });
+    }
+
+};
+
+int main()
+{
+    //open datebase
+    sqlite3* db;
+    int rc = sqlite3_open("mydatabase.db", &db);
+    if (rc)
+    {
+        std::cerr << "cant open database:" << sqlite3_errmsg(db) << std::endl;
+        return 1;
+    }
+
+    boost::asio::io_context io_service;
+    Server server(io_service, 1234, db);
+    io_service.run();
+
+    sqlite3_close(db);
+    return 0;
+}
